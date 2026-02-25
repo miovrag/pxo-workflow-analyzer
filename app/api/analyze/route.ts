@@ -1,171 +1,388 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-export async function POST(req: NextRequest) {
-  try {
-    const formData = await req.formData();
-    const imageFile = formData.get("image") as File;
-    const problemStatement = formData.get("problemStatement") as string;
-    const userSegment = formData.get("userSegment") as string;
-    const metricAtRisk = formData.get("metricAtRisk") as string;
-    const hypothesisX = formData.get("hypothesisX") as string;
-    const hypothesisSegment = formData.get("hypothesisSegment") as string;
-    const hypothesisMetric = formData.get("hypothesisMetric") as string;
-    const hypothesisBehavior = formData.get("hypothesisBehavior") as string;
-    const riskLevel = formData.get("riskLevel") as string;
+const PXO_STEPS = [
+  {
+    id: 0,
+    title: "Problem Hypothesis",
+    subtitle: "Before Empathy",
+    focus: `Generate the Problem Hypothesis section. Include:
+- Refined Problem Statement based on the screenshot
+- Impacted User Segment
+- Business Risk assessment
+- Metric at Risk analysis
+- Current User Alternatives visible in or implied by the interface
+- Why Now reasoning
+- Validated hypothesis statement
+- Risk Level justification`,
+  },
+  {
+    id: 1,
+    title: "Empathy Engine",
+    subtitle: "User emotional landscape",
+    focus: `Generate the Empathy Engine section. Include:
+- **Think**: What users are thinking when using this interface
+- **Feel**: Emotional responses, frustrations, and tensions
+- **Say**: What users would literally say about this experience
+- **Do**: Observable behaviors and patterns
+- **Hidden Frictions**: Non-obvious pain points in the UI
+- **Emotional Risks**: Where trust could break
+- **Trust Barriers**: What prevents adoption or continued engagement`,
+  },
+  {
+    id: 2,
+    title: "JTBD Extraction",
+    subtitle: "Jobs to be done",
+    focus: `Generate the JTBD Extraction section. Include:
+- **Core Functional Job**: What the user is trying to accomplish
+- **Emotional Job**: How they want to feel while doing it
+- **Social Job**: How they want to be perceived
+- **Job Steps** (chronological): Full sequence of steps to complete the job
+- **Success Definition**: What job completion looks like
+- **Failure Definition**: When and why the job fails`,
+  },
+  {
+    id: 3,
+    title: "Constraint Mapping",
+    subtitle: "Technical, data, legal, org",
+    focus: `Generate the Constraint Mapping section. Include:
+- **Technical Constraints**: Backend, model limits, performance, latency
+- **Data Constraints**: Availability, reliability, ownership
+- **Legal/Compliance**: Privacy, accessibility, regulatory
+- **Organizational Constraints**: Team, process, or political limitations
+- **Edge Cases**: Unusual but critical scenarios to handle`,
+  },
+  {
+    id: 4,
+    title: "Persona Roles",
+    subtitle: "Usage archetypes",
+    focus: `Generate the Persona Roles section for three archetypes. For each:
+- Motivation
+- Risk tolerance
+- Cognitive load tolerance
+- UX expectation
 
-    if (!imageFile) {
-      return NextResponse.json({ error: "Image is required" }, { status: 400 });
-    }
+**Naive**: First-time or occasional users
+**Medium**: Regular users with growing familiarity
+**Expert**: Power users who know the system deeply
 
-    const imageBuffer = await imageFile.arrayBuffer();
-    const base64Image = Buffer.from(imageBuffer).toString("base64");
-    const mediaType = (imageFile.type || "image/png") as "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+Ground each persona in what you can infer from the screenshot and problem context.`,
+  },
+  {
+    id: 5,
+    title: "Behavioral Trigger Design",
+    subtitle: "Activation to control",
+    focus: `Generate the Behavioral Trigger Design section. Include:
+- **Activation Trigger**: What makes the user start using this feature
+- **Aha Moment**: When does value become obvious
+- **Competence Moment**: When does the user feel capable and smart
+- **Control Moment**: When does the user feel safe and in control
 
-    const hypothesis = `If we improve ${hypothesisX}, for ${hypothesisSegment}, then ${hypothesisMetric} will improve, because ${hypothesisBehavior}.`;
+Be specific to what you see in the screenshot and tie to the JTBD from the previous section.`,
+  },
+  {
+    id: 6,
+    title: "Information Architecture",
+    subtitle: "IA tree and task flows",
+    focus: `Generate the Information Architecture section. Include:
+- **IA Tree**: Hierarchical structure (Level 1 → Level 2 → Level 3)
+- **Naive Task Flow**: Step-by-step for the naive persona
+- **Medium Task Flow**: Step-by-step for the medium persona
+- **Expert Task Flow**: Step-by-step for the expert persona
 
-    const systemPrompt = `You are a senior product strategist and UX researcher specializing in the PXO (Product Experience Operating System) framework. You analyze product screenshots and inputs to generate structured, actionable PXO analyses.
+Base this on the actual interface visible in the screenshot and the personas from the previous section.`,
+  },
+  {
+    id: 7,
+    title: "Failure Mode Design",
+    subtitle: "What can break",
+    focus: `Generate the Failure Mode Design section. Include:
+- **Failure Modes**: Confusion, empty states, hallucination risk, permission errors, timeouts, partial results — with specific scenarios for this product
+- **System Recovery Design**: For each failure mode, how should the system recover?
+- **Graceful Degradation**: What happens when things partially fail
 
-Your output must be valid JSON. Be specific, insightful, and grounded in what you actually see in the screenshot and the provided context.`;
+Be thorough and practical. Reference specific UI elements from the screenshot.`,
+  },
+  {
+    id: 8,
+    title: "Metric Definition",
+    subtitle: "Primary, secondary, signals",
+    focus: `Generate the Metric Definition section. Include:
+- **Primary Metric**: The single metric that defines success
+- **Secondary Metrics**: 2-3 supporting metrics
+- **Early Signal (7-day)**: Leading indicators in the first week post-launch
+- **Long-Term Signal (30-day)**: Sustained behavior signals
+- **Leading Indicators**: What predicts success before it's measurable
 
-    const userPrompt = `Analyze this product screenshot and generate a complete PXO Workflow analysis.
+Tie directly to the Metric at Risk provided in the inputs and the hypothesis.`,
+  },
+  {
+    id: 9,
+    title: "Low-Fi Specification",
+    subtitle: "Layout, CTA, state logic",
+    focus: `Generate the Low-Fi Specification section (no visual styling, structural only). Include:
+- **Layout Structure**: How elements should be arranged on screen
+- **Priority Hierarchy**: What gets visual weight and attention order
+- **CTA Logic**: When and how calls-to-action appear
+- **State Logic**: All states the UI can be in (loading, empty, error, success, partial)
+- **Error States**: What errors look like and what copy they contain
+- **Empty States**: What zero-data or first-time states look like
 
-## Provided Context:
-- Problem Statement: ${problemStatement}
-- User Segment: ${userSegment}
-- Metric at Risk: ${metricAtRisk}
-- Hypothesis: ${hypothesis}
-- Risk Level: ${riskLevel}
+Base this on your IA from section 6 and the personas from section 4.`,
+  },
+  {
+    id: 10,
+    title: "Heuristic & Cognitive Audit",
+    subtitle: "Nielsen, cognitive load, accessibility",
+    focus: `Generate the Heuristic & Cognitive Audit. Evaluate the interface against:
 
-## Instructions:
-Analyze the screenshot carefully. Generate all 12 PXO sections plus a summary.
+**Nielsen's 10 Heuristics** — for each relevant heuristic, list specific violations and improvements
+**Cognitive Load Theory** — where does the interface overwhelm? How to reduce?
+**Progressive Disclosure** — is complexity revealed at the right moment?
+**Accessibility** — WCAG 2.1 considerations specific to this interface
+**Error Prevention** — where could errors be prevented before they happen?
 
-Return ONLY valid JSON in this exact format:
-{
-  "summary": "3-4 sentence executive summary covering the core problem, key insight from the screenshot, recommended focus, and expected impact",
-  "sections": [
-    {
-      "id": 0,
-      "title": "Problem Hypothesis",
-      "subtitle": "Before Empathy",
-      "content": "detailed analysis for this section"
-    },
-    {
-      "id": 1,
-      "title": "Empathy Engine",
-      "subtitle": "User emotional landscape",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 2,
-      "title": "JTBD Extraction",
-      "subtitle": "Jobs to be done",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 3,
-      "title": "Constraint Mapping",
-      "subtitle": "Technical, data, legal, org",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 4,
-      "title": "Persona Roles",
-      "subtitle": "Usage archetypes",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 5,
-      "title": "Behavioral Trigger Design",
-      "subtitle": "Activation to control",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 6,
-      "title": "Information Architecture",
-      "subtitle": "IA tree and task flows",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 7,
-      "title": "Failure Mode Design",
-      "subtitle": "What can break",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 8,
-      "title": "Metric Definition",
-      "subtitle": "Primary, secondary, signals",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 9,
-      "title": "Low-Fi Specification",
-      "subtitle": "Layout, CTA, state logic",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 10,
-      "title": "Heuristic & Cognitive Audit",
-      "subtitle": "Nielsen, cognitive load, accessibility",
-      "content": "detailed analysis"
-    },
-    {
-      "id": 11,
-      "title": "Validation Loop",
-      "subtitle": "Before and after development",
-      "content": "detailed analysis"
-    }
-  ]
+Format as: Heuristic → Violation → Improvement. Be specific to what you see in the screenshot.`,
+  },
+  {
+    id: 11,
+    title: "Validation Loop",
+    subtitle: "Before and after development",
+    focus: `Generate the Validation Loop section.
+
+**Before Development** — for each question, provide specific tests or methods:
+- Does this reduce cognitive load? How to test?
+- Does it improve job completion speed? How to measure?
+- Does it reduce risk perception? How to validate?
+- What to prototype and test first?
+
+**After Release** — provide specific things to watch for:
+- Behavior changes to monitor
+- Metric movements expected (and thresholds)
+- Unexpected failure modes to watch
+- Iteration triggers: when to iterate vs. stay the course
+
+Make this actionable and specific to the product context.`,
+  },
+];
+
+async function analyzeScreenshot(
+  base64Image: string,
+  mediaType: string,
+  problemStatement: string
+): Promise<string> {
+  const message = await client.messages.create({
+    model: "claude-opus-4-6",
+    max_tokens: 1500,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: mediaType as
+                | "image/png"
+                | "image/jpeg"
+                | "image/gif"
+                | "image/webp",
+              data: base64Image,
+            },
+          },
+          {
+            type: "text",
+            text: `Analyze this product screenshot in detail. Your description will be used as context for 12 sequential UX analysis steps.
+
+Describe:
+1. Type of interface (web app, mobile, dashboard, etc.)
+2. Key UI elements, components, and layout structure
+3. The user flow or state being shown
+4. Information hierarchy and visual organization
+5. Apparent purpose and context of this screen
+6. Any immediately visible UX strengths or issues
+
+Context: Problem being solved — "${problemStatement}"
+
+Be thorough and specific. 4-6 paragraphs.`,
+          },
+        ],
+      },
+    ],
+  });
+
+  return (message.content[0] as { type: "text"; text: string }).text;
 }
 
-Each content field should be thorough, structured with clear sub-points, and directly tied to what you observe in the screenshot and the provided inputs. Use markdown formatting within the content strings (bullet points, bold, headers).`;
+async function runStep(
+  step: (typeof PXO_STEPS)[number],
+  screenshotDescription: string,
+  inputs: Record<string, string>,
+  previousSections: Array<{ title: string; content: string }>
+): Promise<string> {
+  const previousContext =
+    previousSections.length > 0
+      ? `\n\n## Previous Analysis (build on this, do not repeat it):\n${previousSections
+          .map((s) => `### ${s.title}\n${s.content}`)
+          .join("\n\n")}`
+      : "";
 
-    const message = await client.messages.create({
-      model: "claude-opus-4-6",
-      max_tokens: 8000,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: mediaType,
-                data: base64Image,
-              },
-            },
-            {
-              type: "text",
-              text: userPrompt,
-            },
-          ],
-        },
-      ],
-    });
+  const hypothesis = `If we improve ${inputs.hypothesisX}, for ${inputs.hypothesisSegment}, then ${inputs.hypothesisMetric} will improve, because ${inputs.hypothesisBehavior}.`;
 
-    const rawContent = message.content[0];
-    if (rawContent.type !== "text") {
-      throw new Error("Unexpected response type from Claude");
-    }
+  const message = await client.messages.create({
+    model: "claude-opus-4-6",
+    max_tokens: 2000,
+    messages: [
+      {
+        role: "user",
+        content: `You are a senior product strategist executing a PXO Workflow analysis. This is step ${step.id + 1} of 12.
 
-    // Strip markdown code fences if present
-    let jsonText = rawContent.text.trim();
-    if (jsonText.startsWith("```")) {
-      jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-    }
+## Screenshot Analysis:
+${screenshotDescription}
 
-    const result = JSON.parse(jsonText);
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error("Analysis error:", error);
-    return NextResponse.json(
-      { error: "Analysis failed. Check your API key and try again." },
-      { status: 500 }
-    );
-  }
+## Inputs:
+- Problem Statement: ${inputs.problemStatement}
+- User Segment: ${inputs.userSegment}
+- Metric at Risk: ${inputs.metricAtRisk}
+- Hypothesis: ${hypothesis}
+- Risk Level: ${inputs.riskLevel}
+${previousContext}
+
+## Your task — ${step.title}:
+${step.focus}
+
+Rules:
+- Be specific and grounded in the screenshot and inputs
+- Build directly on previous sections — reference them when relevant
+- Use markdown formatting (bullets, **bold**, headers)
+- Do NOT add a top-level title for this section
+- Output only the section content`,
+      },
+    ],
+  });
+
+  return (message.content[0] as { type: "text"; text: string }).text;
+}
+
+async function generateSummary(
+  sections: Array<{ title: string; content: string }>,
+  inputs: Record<string, string>
+): Promise<string> {
+  const message = await client.messages.create({
+    model: "claude-opus-4-6",
+    max_tokens: 600,
+    messages: [
+      {
+        role: "user",
+        content: `Based on this complete PXO analysis, write a concise executive summary (4-5 sentences) covering:
+1. Core problem and affected user segment
+2. Most critical insight from the full analysis
+3. Recommended immediate focus area
+4. Expected impact if addressed
+
+Problem: ${inputs.problemStatement}
+Risk Level: ${inputs.riskLevel}
+
+Full Analysis:
+${sections.map((s) => `### ${s.title}\n${s.content}`).join("\n\n")}
+
+Write only the summary paragraph. No headings, no bullets. Just prose.`,
+      },
+    ],
+  });
+
+  return (message.content[0] as { type: "text"; text: string }).text;
+}
+
+export async function POST(req: NextRequest) {
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: object) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+        );
+      };
+
+      try {
+        const formData = await req.formData();
+        const imageFile = formData.get("image") as File;
+
+        if (!imageFile) {
+          send({ type: "error", message: "Image is required" });
+          controller.close();
+          return;
+        }
+
+        const inputs = {
+          problemStatement: (formData.get("problemStatement") as string) || "",
+          userSegment: (formData.get("userSegment") as string) || "",
+          metricAtRisk: (formData.get("metricAtRisk") as string) || "",
+          hypothesisX: (formData.get("hypothesisX") as string) || "",
+          hypothesisSegment:
+            (formData.get("hypothesisSegment") as string) || "",
+          hypothesisMetric: (formData.get("hypothesisMetric") as string) || "",
+          hypothesisBehavior:
+            (formData.get("hypothesisBehavior") as string) || "",
+          riskLevel: (formData.get("riskLevel") as string) || "Medium",
+        };
+
+        const imageBuffer = await imageFile.arrayBuffer();
+        const base64Image = Buffer.from(imageBuffer).toString("base64");
+        const mediaType = imageFile.type || "image/png";
+
+        // Pre-step: analyze screenshot
+        send({ type: "step_start", step: -1, title: "Analyzing screenshot..." });
+        const screenshotDescription = await analyzeScreenshot(
+          base64Image,
+          mediaType,
+          inputs.problemStatement
+        );
+        send({ type: "screenshot_done" });
+
+        // Run 12 sequential steps
+        const completedSections: Array<{ title: string; content: string }> = [];
+
+        for (const step of PXO_STEPS) {
+          send({ type: "step_start", step: step.id, title: step.title });
+          const content = await runStep(
+            step,
+            screenshotDescription,
+            inputs,
+            completedSections
+          );
+          completedSections.push({ title: step.title, content });
+          send({
+            type: "step_complete",
+            section: { id: step.id, title: step.title, subtitle: step.subtitle, content },
+          });
+        }
+
+        // Generate summary
+        send({ type: "step_start", step: 12, title: "Writing summary..." });
+        const summary = await generateSummary(completedSections, inputs);
+        send({ type: "summary_complete", summary });
+
+        send({ type: "done" });
+      } catch (err) {
+        send({
+          type: "error",
+          message: err instanceof Error ? err.message : "Analysis failed",
+        });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    },
+  });
 }
